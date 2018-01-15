@@ -7,6 +7,7 @@ import numpy as np
 
 # data path
 DATA_ROOT = join("/mnt/lustre/sjtu/shared/", 'data/tts/voice-conversion', 'arctic')
+NPY_ROOT = join("/mnt/lustre/sjtu/users/", 'kc430/data/my/arctic')
 
 # parameters
 fs = 16000

@@ -2,16 +2,17 @@
 import pyworld
 import pysptk
 import numpy as np
+import os
 import pickle
+import librosa
 
 from nnmnkwii.baseline.gmm import MLPG
 from nnmnkwii.datasets import PaddedFileSourceDataset
 from nnmnkwii.metrics import melcd
-from nnmnkwii.preprocessing import delta_features
+from nnmnkwii.preprocessing import delta_features, remove_zeros_frames
 from nnmnkwii.preprocessing.alignment import DTWAligner
 from nnmnkwii.util import apply_each2d_trim
 from pysptk.synthesis import MLSADF, Synthesizer
-from scipy.io import wavfile
 from sklearn.mixture import GaussianMixture
 
 from datasets import MyFileDataSource
@@ -22,10 +23,10 @@ def train(source_dataset, target_dataset):
     source_data = PaddedFileSourceDataset(source_dataset, 1200).asarray()
     target_data = PaddedFileSourceDataset(target_dataset, 1200).asarray()
 
-    # Drop 1st dimension
-    source_data, target_data = source_data[:, :, 1:], target_data[:, :, 1:]
-
     source_data_aligned, target_data_aligned = DTWAligner(verbose=0, dist=melcd).transform((source_data, target_data))
+
+    # Drop 1st dimension
+    source_data_aligned, target_data_aligned = source_data_aligned[:, :, 1:], target_data_aligned[:, :, 1:]
 
     static_dim = source_data_aligned.shape[-1]
     if hparams.use_delta:
@@ -33,13 +34,17 @@ def train(source_dataset, target_dataset):
         target_data_aligned = apply_each2d_trim(delta_features, target_data_aligned, hparams.windows)
 
     final_data = np.concatenate((source_data_aligned, target_data_aligned), axis=-1).reshape(-1, source_data_aligned.shape[-1]*2)
+    print("origin shape: {}".format(final_data.shape))
+    final_data = remove_zeros_frames(final_data)
+    print("after remove zero frames: {}".format(final_data.shape))
+
     gmm = GaussianMixture(n_components=64, covariance_type="full", max_iter=100, verbose=1)
     gmm.fit(final_data)
 
     return gmm, static_dim
 
 
-def test_one_utt(gmm, static_dim, src_path, tgt_path, disable_mlpg=False, diffvc=True):
+def test_one_utt(gmm, static_dim, src_path, disable_mlpg=False, diffvc=True):
     # GMM-based parameter generation is provided by the library in `baseline` module
     if disable_mlpg:
         # Force disable MLPG
@@ -47,7 +52,12 @@ def test_one_utt(gmm, static_dim, src_path, tgt_path, disable_mlpg=False, diffvc
     else:
         paramgen = MLPG(gmm, windows=hparams.windows, diff=diffvc)
 
-    fs, x = wavfile.read(src_path)
+    # transform npy path to wav path
+    wav_id = src_path.split('/')[-1].split('.')[0]
+    speaker = wav_id.split('_')[3]
+    wav_path = os.path.join(hparams.DATA_ROOT, 'cmu_us_{}_arctic'.format(speaker), 'wav/{}.wav'.format(wav_id))
+
+    x, fs = librosa.load(path=wav_path, sr=hparams.fs)
     x = x.astype(np.float64)
     f0, timeaxis = pyworld.dio(x, fs, frame_period=hparams.frame_period)
     f0 = pyworld.stonemask(x, f0, timeaxis, fs)
@@ -81,8 +91,8 @@ def test_one_utt(gmm, static_dim, src_path, tgt_path, disable_mlpg=False, diffvc
 def main():
 
     print("*" * 25, "Begin to load data", "*" * 25)
-    clb_source = MyFileDataSource(data_root=hparams.DATA_ROOT, speakers=["clb"], max_files=hparams.max_files)
-    slt_source = MyFileDataSource(data_root=hparams.DATA_ROOT, speakers=["slt"], max_files=hparams.max_files)
+    clb_source = MyFileDataSource(data_root=hparams.NPY_ROOT, speakers=["clb"], max_files=hparams.max_files)
+    slt_source = MyFileDataSource(data_root=hparams.NPY_ROOT, speakers=["slt"], max_files=hparams.max_files)
     print("*" * 25, "Finsh to load data", "*" * 25)
 
     print("*" * 25, "Begin to train", "*" * 25)
@@ -90,16 +100,16 @@ def main():
     print("*" * 25, "Finish to train", "*" * 25)
 
     # save gmm model
-    with open('model/gmm/baseline.model', 'wb') as f:
-        pickle.dump(gmm, f)
+    with open('result/gmm/baseline.model', 'wb') as f:
+        pickle.dump({'gmm': gmm, 'static_dim': static_dim}, f)
 
     print("*" * 25, "Begin to test", "*" * 25)
-    for i, (src_path, tgt_path) in enumerate(zip(clb_source.test_paths, slt_source.test_paths)):
+    for i, src_path in enumerate(clb_source.test_paths):
         print("{}-th sample".format(i + 1))
-        wo_MLPG = test_one_utt(gmm, static_dim, src_path, tgt_path, disable_mlpg=True)
-        w_MLPG = test_one_utt(gmm, static_dim, src_path, tgt_path, disable_mlpg=False)
-        wavfile.write("wav/gmm/w_MLPG_{}.wav".format(i + 1), rate=16000, data=w_MLPG)
-        wavfile.write("wav/gmm/wo_MLPG_{}.wav".format(i + 1), rate=16000, data=wo_MLPG)
+        wo_MLPG = test_one_utt(gmm, static_dim, src_path, disable_mlpg=True)
+        w_MLPG = test_one_utt(gmm, static_dim, src_path, disable_mlpg=False)
+        librosa.output.write_wav("wav/gmm/w_MLPG_{}.wav".format(i + 1), w_MLPG, sr=hparams.fs)
+        librosa.output.write_wav("wav/gmm/wo_MLPG_{}.wav".format(i + 1), wo_MLPG, sr=hparams.fs)
     print("*" * 25, "Finish to test", "*" * 25)
 
 
