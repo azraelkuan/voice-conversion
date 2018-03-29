@@ -1,80 +1,58 @@
-# -*- coding: utf-8 -*-
-
 import argparse
-import numpy as np
-import pyworld
-import pysptk
 import os
-import librosa
-
-from concurrent.futures import ProcessPoolExecutor
-from functools import partial
-
-from nnmnkwii.preprocessing import trim_zeros_frames
-from nnmnkwii.datasets.cmu_arctic import CMUArcticWavFileDataSource
-from utils import hparams
+from multiprocessing import cpu_count
 from tqdm import tqdm
+import importlib
+import config
+import numpy as np
 
 
-available_speakers = ["awb", "bdl", "clb", "jmk", "ksp", "rms", "slt"]
+def preprocess(mod, in_dir, out_dir, num_workers):
+    os.makedirs(out_dir, exist_ok=True)
+    metadata = mod.build_from_path(in_dir, out_dir, num_workers, tqdm=tqdm)
+    lf0s = {}
+    for m in metadata:
+        if m[3] not in lf0s:
+            lf0s[m[3]] = m[4]
+        else:
+            lf0s[m[3]].extend(m[4])
+    with open(os.path.join(out_dir, 'norm.txt'), 'w', encoding='utf-8') as f:
+        for k, v in lf0s.items():
+            v = np.asarray(v)
+            nonzero_indices = np.nonzero(v)
+            mean = np.mean(v[nonzero_indices])
+            std = np.std(v[nonzero_indices])
+            f.write('{} {} {}\n'.format(k, mean, std))
+
+    write_metadata(metadata, out_dir)
 
 
-def str_to_bool(bool_string):
-    if bool_string == "true":
-        return True
-    else:
-        return False
+def write_metadata(metadata, out_dir):
+    with open(os.path.join(out_dir, 'train.txt'), 'w', encoding='utf-8') as f:
+        for m in metadata:
+            f.write('|'.join([str(x) for x in m[:-1]]) + '\n')
+    frames = sum([m[1] for m in metadata])
+    sr = config.fs
+    hours = frames * config.frame_period / 1000 / 3600
+    print('Wrote %d utterances, %d time steps (%.2f hours)' % (len(metadata), frames, hours))
 
 
-def get_args():
-    parser = argparse.ArgumentParser("pre process the arctic data")
-    parser.add_argument('--speaker', type=str, default='clb', help="the speaker u want to deal")
-    parser.add_argument('--all', type=str_to_bool, default="false", help="whether deal all the speaker")
-    parser.add_argument('--output_dir', type=str, default=None, help='the dir to save feature')
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--name', type=str, default=None)
+    parser.add_argument('--in_dir', type=str, default=None)
+    parser.add_argument('--out_dir', type=str, default=None)
+    parser.add_argument('--num_workers', type=str, default=None)
     args = parser.parse_args()
-    return args
 
+    name = args.name
+    in_dir = args.in_dir
+    out_dir = args.out_dir
+    num_workers = args.num_workers
+    num_workers = cpu_count() if num_workers is None else int(num_workers)
 
-def build_from_path(files, output_dir, num_workers=4):
-    executor = ProcessPoolExecutor(max_workers=num_workers)
-    futures = []
+    print("Sampling frequency: {}".format(config.fs))
 
-    for path in files:
-        futures.append(executor.submit(partial(get_feature, path, output_dir)))
-
-    return [future.result() for future in tqdm(futures)]
-
-
-def get_feature(path, output_dir):
-    x, fs = librosa.load(path, sr=hparams.fs)
-    x = x.astype(np.float64)
-    f0, timeaxis = pyworld.dio(x, fs, frame_period=hparams.frame_period)
-    f0 = pyworld.stonemask(x, f0, timeaxis, fs)
-    spectrogram = pyworld.cheaptrick(x, f0, timeaxis, fs)
-    spectrogram = trim_zeros_frames(spectrogram)
-    mc = pysptk.sp2mc(spectrogram, order=hparams.order, alpha=hparams.alpha)
-
-    wav_id = path.split('/')[-1].split(".")[0]
-    speaker = wav_id.split('_')[3]
-    os.makedirs(os.path.join(output_dir, speaker), exist_ok=True)
-    np.save(os.path.join(output_dir, speaker, wav_id), mc)
-
-
-def main():
-    args = get_args()
-
-    if args.output_dir is None:
-        raise ValueError("the output dir is not None!")
-
-    if args.all:
-        speakers = available_speakers
-    else:
-        speakers = [args.speaker]
-
-    data_source = CMUArcticWavFileDataSource(data_root=hparams.DATA_ROOT, speakers=speakers)
-    files = data_source.collect_files()
-    build_from_path(files, args.output_dir, num_workers=4)
-
-
-if __name__ == '__main__':
-    main()
+    assert name in ["cmu_arctic"]
+    mod = importlib.import_module('datasets.{}'.format(name))
+    preprocess(mod, in_dir, out_dir, num_workers)

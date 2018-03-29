@@ -1,117 +1,134 @@
-# -*- coding: utf-8 -*-
+from nnmnkwii.datasets import PaddedFileSourceDataset
+from nnmnkwii.datasets.cmu_arctic import CMUArcticWavFileDataSource
+from nnmnkwii.preprocessing.alignment import DTWAligner
+from nnmnkwii.preprocessing import trim_zeros_frames, remove_zeros_frames, delta_features
+from nnmnkwii.util import apply_each2d_trim
+from nnmnkwii.metrics import melcd
+from nnmnkwii.baseline.gmm import MLPG
+
+import pickle
+import config
+import librosa
+import os
+
+import numpy as np
+from sklearn.mixture import GaussianMixture
+from sklearn.model_selection import train_test_split
 import pyworld
 import pysptk
-import numpy as np
-import os
-import pickle
-import librosa
-
-from nnmnkwii.baseline.gmm import MLPG
-from nnmnkwii.datasets import PaddedFileSourceDataset
-from nnmnkwii.metrics import melcd
-from nnmnkwii.preprocessing import delta_features, remove_zeros_frames
-from nnmnkwii.preprocessing.alignment import DTWAligner
-from nnmnkwii.util import apply_each2d_trim
 from pysptk.synthesis import MLSADF, Synthesizer
-from sklearn.mixture import GaussianMixture
-
-from datasets import MyFileDataSource
-from utils import hparams
 
 
-def train(source_dataset, target_dataset):
-    source_data = PaddedFileSourceDataset(source_dataset, 1200).asarray()
-    target_data = PaddedFileSourceDataset(target_dataset, 1200).asarray()
+class MyFileDataSource(CMUArcticWavFileDataSource):
+    def __init__(self, *args, **kwargs):
+        super(MyFileDataSource, self).__init__(*args, **kwargs)
+        self.test_paths = None
 
-    source_data_aligned, target_data_aligned = DTWAligner(verbose=0, dist=melcd).transform((source_data, target_data))
+    def collect_files(self):
+        paths = super(MyFileDataSource, self).collect_files()
+        paths_train, paths_test = train_test_split(
+            paths, test_size=config.test_size, random_state=1234)
 
-    # Drop 1st dimension
-    source_data_aligned, target_data_aligned = source_data_aligned[:, :, 1:], target_data_aligned[:, :, 1:]
+        # keep paths for later testing
+        self.test_paths = paths_test
 
-    static_dim = source_data_aligned.shape[-1]
-    if hparams.use_delta:
-        source_data_aligned = apply_each2d_trim(delta_features, source_data_aligned, hparams.windows)
-        target_data_aligned = apply_each2d_trim(delta_features, target_data_aligned, hparams.windows)
+        return paths_train
 
-    final_data = np.concatenate((source_data_aligned, target_data_aligned), axis=-1).reshape(-1, source_data_aligned.shape[-1]*2)
-    print("origin shape: {}".format(final_data.shape))
-    final_data = remove_zeros_frames(final_data)
-    print("after remove zero frames: {}".format(final_data.shape))
-
-    gmm = GaussianMixture(n_components=64, covariance_type="full", max_iter=100, verbose=1)
-    gmm.fit(final_data)
-
-    return gmm, static_dim
+    def collect_features(self, path):
+        x, fs = librosa.load(path, sr=config.fs)
+        x = x.astype(np.float64)
+        f0, timeaxis = pyworld.dio(x, fs, frame_period=config.frame_period)
+        f0 = pyworld.stonemask(x, f0, timeaxis, fs)
+        spectrogram = pyworld.cheaptrick(x, f0, timeaxis, fs)
+        spectrogram = trim_zeros_frames(spectrogram)
+        mc = pysptk.sp2mc(spectrogram, order=config.order, alpha=config.alpha)
+        return mc
 
 
-def test_one_utt(gmm, static_dim, src_path, disable_mlpg=False, diffvc=True):
+def test_one_utt(src_path, tgt_path, disable_mlpg=False, diffvc=True):
     # GMM-based parameter generation is provided by the library in `baseline` module
     if disable_mlpg:
         # Force disable MLPG
         paramgen = MLPG(gmm, windows=[(0, 0, np.array([1.0]))], diff=diffvc)
     else:
-        paramgen = MLPG(gmm, windows=hparams.windows, diff=diffvc)
+        paramgen = MLPG(gmm, windows=config.windows, diff=diffvc)
 
-    # transform npy path to wav path
-    wav_id = src_path.split('/')[-1].split('.')[0]
-    speaker = wav_id.split('_')[3]
-    wav_path = os.path.join(hparams.DATA_ROOT, 'cmu_us_{}_arctic'.format(speaker), 'wav/{}.wav'.format(wav_id))
-
-    x, fs = librosa.load(path=wav_path, sr=hparams.fs)
+    x, fs = librosa.load(src_path, sr=config.fs)
     x = x.astype(np.float64)
-    f0, timeaxis = pyworld.dio(x, fs, frame_period=hparams.frame_period)
+    f0, timeaxis = pyworld.dio(x, fs, frame_period=config.frame_period)
     f0 = pyworld.stonemask(x, f0, timeaxis, fs)
     spectrogram = pyworld.cheaptrick(x, f0, timeaxis, fs)
     aperiodicity = pyworld.d4c(x, f0, timeaxis, fs)
 
-    mc = pysptk.sp2mc(spectrogram, order=hparams.order, alpha=hparams.alpha)
+    mc = pysptk.sp2mc(spectrogram, order=config.order, alpha=config.alpha)
     c0, mc = mc[:, 0], mc[:, 1:]
-    if hparams.use_delta:
-        mc = delta_features(mc, hparams.windows)
-
+    if config.use_delta:
+        mc = delta_features(mc, config.windows)
     mc = paramgen.transform(mc)
     if disable_mlpg and mc.shape[-1] != static_dim:
         mc = mc[:, :static_dim]
     assert mc.shape[-1] == static_dim
     mc = np.hstack((c0[:, None], mc))
     if diffvc:
-        mc[:, 0] = 0  # remove power coefficients
-        engine = Synthesizer(MLSADF(order=hparams.order, alpha=hparams.alpha), hopsize=hparams.hop_length)
-        b = pysptk.mc2b(mc.astype(np.float64), alpha=hparams.alpha)
+        mc[:, 0] = 0 # remove power coefficients
+        engine = Synthesizer(MLSADF(order=config.order, alpha=config.alpha), hopsize=config.hop_length)
+        b = pysptk.mc2b(mc.astype(np.float64), alpha=config.alpha)
         waveform = engine.synthesis(x, b)
     else:
         spectrogram = pysptk.mc2sp(
-            mc.astype(np.float64), alpha=hparams.alpha, fftlen=hparams.fft_len)
+            mc.astype(np.float64), alpha=config.alpha, fftlen=config.fftlen)
         waveform = pyworld.synthesize(
-            f0, spectrogram, aperiodicity, fs, hparams.frame_period)
+            f0, spectrogram, aperiodicity, fs, config.frame_period)
 
     return waveform
 
 
-def main():
+clb_source = MyFileDataSource(data_root=config.data_root,
+                              speakers=["bdl"], max_files=config.max_files)
+slt_source = MyFileDataSource(data_root=config.data_root,
+                              speakers=["slt"], max_files=config.max_files)
 
-    print("*" * 25, "Begin to load data", "*" * 25)
-    clb_source = MyFileDataSource(data_root=hparams.NPY_ROOT, speakers=["clb"], max_files=hparams.max_files)
-    slt_source = MyFileDataSource(data_root=hparams.NPY_ROOT, speakers=["slt"], max_files=hparams.max_files)
-    print("*" * 25, "Finsh to load data", "*" * 25)
+X = PaddedFileSourceDataset(clb_source, 1200).asarray()
+Y = PaddedFileSourceDataset(slt_source, 1200).asarray()
 
-    print("*" * 25, "Begin to train", "*" * 25)
-    gmm, static_dim = train(clb_source, slt_source)
-    print("*" * 25, "Finish to train", "*" * 25)
+# Alignment
+X_aligned, Y_aligned = DTWAligner(verbose=0, dist=melcd).transform((X, Y))
 
-    # save gmm model
-    with open('result/gmm/baseline.model', 'wb') as f:
-        pickle.dump({'gmm': gmm, 'static_dim': static_dim}, f)
+# Drop 1st (power) dim
+X_aligned, Y_aligned = X_aligned[:, :, 1:], Y_aligned[:, :, 1:]
 
-    print("*" * 25, "Begin to test", "*" * 25)
-    for i, src_path in enumerate(clb_source.test_paths):
-        print("{}-th sample".format(i + 1))
-        wo_MLPG = test_one_utt(gmm, static_dim, src_path, disable_mlpg=True)
-        w_MLPG = test_one_utt(gmm, static_dim, src_path, disable_mlpg=False)
-        librosa.output.write_wav("wav/gmm/w_MLPG_{}.wav".format(i + 1), w_MLPG, sr=hparams.fs)
-        librosa.output.write_wav("wav/gmm/wo_MLPG_{}.wav".format(i + 1), wo_MLPG, sr=hparams.fs)
-    print("*" * 25, "Finish to test", "*" * 25)
+# apply MLPG
+static_dim = X_aligned.shape[-1]
+if config.use_delta:
+    X_aligned = apply_each2d_trim(delta_features, X_aligned, config.windows)
+    Y_aligned = apply_each2d_trim(delta_features, Y_aligned, config.windows)
+
+XY = np.concatenate((X_aligned, Y_aligned), axis=-1).reshape(-1, X_aligned.shape[-1]*2)
+# remove zero padding
+XY = remove_zeros_frames(XY)
+
+# train gmm
+
+gmm = GaussianMixture(n_components=64, covariance_type="full", max_iter=100, verbose=1)
+gmm.fit(XY)
+
+os.makedirs("checkpoints", exist_ok=True)
+# save gmm model
+with open("checkpoints/gmm.cpt", 'wb') as f:
+    pickle.dump(gmm, f)
+
+# test
+os.makedirs("wavs/gmm", exist_ok=True)
+
+for i, (src_path, tgt_path) in enumerate(zip(clb_source.test_paths, slt_source.test_paths)):
+    print("{}-th sample".format(i+1))
+    wo_MLPG = test_one_utt(src_path, tgt_path, disable_mlpg=True)
+    w_MLPG = test_one_utt(src_path, tgt_path, disable_mlpg=False)
+
+    maxv = np.iinfo(np.int16).max
+    librosa.output.write_wav('wavs/gmm/w_MLPG_{}.wav'.format(i), (w_MLPG*maxv).astype(np.int16), config.fs)
+    librosa.output.write_wav('wavs/gmm/wo_MLPG_{}.wav'.format(i), (wo_MLPG*maxv).astype(np.int16), config.fs)
 
 
-if __name__ == '__main__':
-    main()
+
+

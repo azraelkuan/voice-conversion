@@ -1,24 +1,17 @@
-# -*- coding: utf-8 -*-
 import pyworld
 import pysptk
-from os.path import join, expanduser
 import numpy as np
+from os.path import join, expanduser
 
 
-# data path
-DATA_ROOT = join("/mnt/lustre/sjtu/shared/", 'data/tts/voice-conversion', 'arctic')
-NPY_ROOT = join("/mnt/lustre/sjtu/users/", 'kc430/data/my/arctic')
-
-# parameters
+data_root = join(expanduser("~"), "data/sjtu/tts/voice-conversion/arctic/")
 fs = 16000
-fft_len = pyworld.get_cheaptrick_fft_size(fs)
+fftlen = pyworld.get_cheaptrick_fft_size(fs)
 alpha = pysptk.util.mcepalpha(fs)
 order = 24
 frame_period = 5
 hop_length = int(fs * (frame_period * 0.001))
-test_size = 0.03
-
-max_files = 100  # number of utterances to be used.
+max_files = 100  # number of utterances to be used for gmm
 test_size = 0.03
 use_delta = True
 
@@ -32,4 +25,3 @@ else:
     windows = [
         (0, 0, np.array([1.0])),
     ]
-
