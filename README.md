@@ -4,33 +4,26 @@
 
 ## ToDo List
 - [x] GMM Baseline
-- [ ] LSTM Result 
+- [x] LSTM Result
 - [ ] Dual Result
 - [ ] Gan Result
 
 
 ## First
-substitute the arctic data dir in `utils/hparams.py`
-
-
-## Pre process
-Since the process of getting mgc feature is too slow, so we preprocess is to numpy array and save it.
-
-> for single speaker
-
-`python preprocess.py --speaker slt --output_dir /your_arctic_npy_dir/`
-
-> for all speaker
-
-`python preprocess.py --all true --output_dir /your_arctic_npy_dir/`
-
+check the data root in `config.py` and replace it by yours
 
 ## GMM Baseline
 the gmm baseline is copied from the [nnmnkwii gitpage](https://r9y9.github.io/nnmnkwii/latest/nnmnkwii_gallery/notebooks/vc/01-GMM%20voice%20conversion%20(en).html)
 
-1. `python train_gmmm.py | tee log/gmm.log`
-2. check the generated wav in `wav/gmm`
+## LSTM
+### Prepare Data
+replace the `in_dir` and `out_dir` in `run_pre.sh` and then run it.
+> the `in_dir` contains wavs like `xx/arctic/cmu_us_bdl_arctic/wav/xx.wav`
 
+### Train
+replace the `data_root` in `run_rnn.sh` and choose the source(target) speaker, then run it.
+> finally the checkpoint will be saved in the dir `checkpoints`
 
-## LSTM 
+### Test
+replace the ssp tsp checkpoint_path in `test.py`, the result wav will be under the dir `wavs`
 

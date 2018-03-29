@@ -12,5 +12,6 @@ source activate dl
 python train_rnn.py \
     --ssp bdl \
     --tsp slt \
-    --epochs 30
+    --data_root /mnt/lustre/sjtu/users/kc430/data/my/vc/cmu_arctic \
+    --epochs 30 \
 
