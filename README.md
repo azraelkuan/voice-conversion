@@ -5,7 +5,7 @@
 ## ToDo List
 - [x] GMM Baseline
 - [x] LSTM Result
-- [ ] Dual Result
+- [x] Dual Result
 - [ ] Gan Result
 
 
@@ -26,4 +26,7 @@ replace the `data_root` in `run_rnn.sh` and choose the source(target) speaker, t
 
 ### Test
 replace the ssp tsp checkpoint_path in `test.py`, the result wav will be under the dir `wavs`
+
+### Dual
+the train and test process is the same of LSTM except add the args `dual`
 

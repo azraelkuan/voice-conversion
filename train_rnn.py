@@ -1,4 +1,5 @@
 import argparse
+import random
 
 import torch
 import torch.nn as nn
@@ -7,7 +8,7 @@ from torch.autograd import Variable
 from torch.utils.data import DataLoader
 
 from datafeeder import McepDataSet, collate_fn
-from model import McepNet
+from model import McepNet, DualMcepNet
 
 # hyper parameters
 ssp = "clb"
@@ -34,6 +35,7 @@ def get_args():
     parser.add_argument('--hidden_dim', type=int, default=128, help='the hidden dim of LSTM Cell')
     parser.add_argument('--num_layers', type=int, default=2, help='the num layers of LSTM Cell')
     parser.add_argument('--bidirectional', type=str_to_bool, default=True, help='whether use bidirectional LSTM')
+    parser.add_argument('--dual', type=str_to_bool, default=False, help='whether use a simple dual')
 
     args = parser.parse_args()
     return args
@@ -69,10 +71,15 @@ def main():
 
     dataloaders = {'train': train_dataloader, 'dev': dev_dataloader}
 
-    net = McepNet(args.in_dim, args.out_dim, args.hidden_dim, args.num_layers, args.bidirectional)
+    if args.dual:
+        net = DualMcepNet(args.in_dim, args.out_dim, args.hidden_dim, args.num_layers, args.bidirectional)
+    else:
+        net = McepNet(args.in_dim, args.out_dim, args.hidden_dim, args.num_layers, args.bidirectional)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(params=net.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=0.2, min_lr=1e-5, verbose=True)
+    print(net)
+    print("*"*100)
 
     if use_cuda:
         net, criterion = net.cuda(), criterion.cuda()
@@ -91,10 +98,19 @@ def main():
                     inputs, outputs, h, c = inputs.cuda(), outputs.cuda(), h.cuda(), c.cuda()
 
                 optimizer.zero_grad()
-                predicts = net(inputs, sorted_lengths, h, c)
+                if args.dual:
+                    if random.random() < 0.5:
+                        inv_outputs, inv_inputs = net(inputs, sorted_lengths, h, c, dual=False)
+                    else:
+                        inv_inputs, inv_outputs = net(outputs, sorted_lengths, h, c, dual=True)
+                    loss = criterion(inv_inputs.view(-1, args.in_dim), inputs.view(-1, args.in_dim)) + \
+                        criterion(inv_outputs.view(-1, args.out_dim), outputs.view((-1, args.out_dim)))
+                    print_loss[phase] += loss.data[0]
+                else:
+                    predicts = net(inputs, sorted_lengths, h, c)
 
-                loss = criterion(predicts.view(-1, args.out_dim), outputs.view(-1, args.in_dim))
-                print_loss[phase] += loss.data[0]
+                    loss = criterion(predicts.view(-1, args.out_dim), outputs.view(-1, args.in_dim))
+                    print_loss[phase] += loss.data[0]
 
                 if phase == 'train':
                     loss.backward()
@@ -102,7 +118,8 @@ def main():
             print_loss[phase] /= len(dataloaders[phase])
         print('Epoch {:<10} Train Loss: {:<20.4f} Dev Loss: {:<20.4f}'.format(epoch, print_loss['train'], print_loss['dev']))
         scheduler.step(print_loss['dev'])
-    save_checkpoint(net, optimizer, '{}-{}-rnn'.format(args.ssp, args.tsp))
+    cpt_name = "{}-{}-dual-rnn" if args.dual else "{}-{}-rnn"
+    save_checkpoint(net, optimizer, cpt_name.format(args.ssp, args.tsp))
 
 
 if __name__ == '__main__':

@@ -14,4 +14,5 @@ python train_rnn.py \
     --tsp slt \
     --data_root /mnt/lustre/sjtu/users/kc430/data/my/vc/cmu_arctic \
     --epochs 30 \
+    --dual True \
 
